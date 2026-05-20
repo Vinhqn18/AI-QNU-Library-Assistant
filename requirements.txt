@@ -246,7 +246,6 @@ wsproto==1.2.0
 xxhash==3.7.0
 yarl==1.22.0
 zstandard==0.25.0
-fastapi==0.115.12
 uvicorn[standard]==0.34.0
 langchain==0.3.21
 langchain-community==0.3.19
