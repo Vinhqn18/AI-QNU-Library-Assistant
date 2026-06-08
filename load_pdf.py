@@ -1,13 +1,75 @@
-"""
+﻿"""
 load_pdf.py — Load tất cả file PDF từ thư mục pdfs/
+Sử dụng pypdf (không langchain) để tương thích Vercel free deploy.
+Tối ưu: Extract metadata (page, title, section), normalize text
 """
 
 import os
 from pathlib import Path
-from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.documents import Document
+from typing import Optional
+from text_utils import normalize_text, generate_document_hash, extract_keywords
+
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
 
 PDF_FOLDER = "pdfs"
+
+
+class Document:
+    """Minimal document class — thay thế langchain_core.documents.Document."""
+    def __init__(self, page_content: str, metadata: Optional[dict] = None):
+        self.page_content = page_content or ""
+        self.metadata = metadata or {}
+
+
+def _read_pdf_with_pypdf(pdf_path: str) -> list[Document]:
+    """Đọc PDF bằng pypdf, trả về list[Document] (mỗi trang một Document)."""
+    docs: list[Document] = []
+    if not PdfReader:
+        print("   ⚠️  pypdf not available — skipping PDF text extraction")
+        return docs
+
+    with open(pdf_path, "rb") as f:
+        reader = PdfReader(f)
+        for page_num, page in enumerate(reader.pages, 1):
+            text = page.extract_text() or ""
+            docs.append(Document(page_content=text, metadata={"page": page_num}))
+
+    return docs
+
+
+def extract_pdf_title(pdf_path: str, pages: list[Document]) -> str:
+    """
+    Extract title từ first page của PDF
+    Logic: First line nếu < 100 chars, hoặc filename
+    """
+    try:
+        if pages:
+            first_page_text = pages[0].page_content.strip()
+            first_line = first_page_text.split("\n")[0].strip()
+            if 5 < len(first_line) < 100:
+                return first_line
+    except Exception:
+        pass
+
+    # Fallback: dùng filename
+    return Path(pdf_path).stem.replace("_", " ").replace("-", " ")
+
+
+def extract_section_heading(page_text: str) -> str:
+    """
+    Extract section heading từ page text
+    Logic: Tìm dòng đầu tiên với < 80 chars (probable heading)
+    """
+    lines = page_text.split("\n")
+    for line in lines[:5]:  # Check first 5 lines
+        line = line.strip()
+        if 5 < len(line) < 80 and line.isupper():  # UPPERCASE heading
+            return line
+    return ""
+
 
 def load_all_pdfs() -> list[Document]:
     """Load tất cả PDF trong thư mục pdfs/, trả về danh sách Document"""
@@ -23,23 +85,46 @@ def load_all_pdfs() -> list[Document]:
         return []
 
     all_docs = []
+    total_pages = 0
+
     for pdf_path in pdf_files:
         try:
             print(f"📄 Đang load: {pdf_path.name}")
-            loader = PyPDFLoader(str(pdf_path))
-            docs   = loader.load()
+            docs = _read_pdf_with_pypdf(str(pdf_path))
+            if not docs:
+                print(f"   ⚠️  Không đọc được nội dung từ {pdf_path.name}")
+                continue
 
-            # Thêm metadata tên file
-            for doc in docs:
-                doc.metadata["source"]    = pdf_path.name
+            # Extract PDF-level metadata
+            pdf_title = extract_pdf_title(str(pdf_path), docs)
+            pdf_keywords = extract_keywords(pdf_title)
+
+            # Thêm metadata tên file + page number + section
+            for page_idx, doc in enumerate(docs, 1):
+                doc.metadata["source"] = pdf_path.name
                 doc.metadata["file_type"] = "pdf"
+                doc.metadata["page"] = page_idx
+                doc.metadata["title"] = pdf_title
+                doc.metadata["keywords"] = pdf_keywords
+
+                # Extract section heading
+                section = extract_section_heading(doc.page_content)
+                if section:
+                    doc.metadata["section"] = section
+
+                # Normalize text for embedding
+                doc.metadata["normalized"] = normalize_text(doc.page_content)
+
+                # Hash for deduplication
+                doc.metadata["hash"] = generate_document_hash(doc.page_content, pdf_title)
 
             all_docs.extend(docs)
+            total_pages += len(docs)
             print(f"   ✅ {len(docs)} trang")
         except Exception as e:
             print(f"   ❌ Lỗi load {pdf_path.name}: {e}")
 
-    print(f"\n📦 Tổng cộng: {len(all_docs)} trang từ {len(pdf_files)} file PDF")
+    print(f"\n📦 Tổng cộng: {total_pages} trang từ {len(pdf_files)} file PDF")
     return all_docs
 
 
